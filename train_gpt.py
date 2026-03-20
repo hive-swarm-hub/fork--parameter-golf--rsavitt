@@ -746,6 +746,19 @@ class Block(nn.Module):
         return x
 
 
+class SmearGate(nn.Module):
+    # Blends each token's embedding with the previous token's embedding via a learned gate.
+    # Provides bigram information before the first attention layer at negligible cost (~dim params).
+    def __init__(self, dim: int):
+        super().__init__()
+        self.gate = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
+
+    def forward(self, x: Tensor) -> Tensor:
+        g = torch.sigmoid(self.gate.to(dtype=x.dtype))[None, None, :]
+        x_prev = F.pad(x[:, :-1, :], (0, 0, 1, 0))
+        return (1 - g) * x + g * x_prev
+
+
 class GPT(nn.Module):
     def __init__(
         self,
@@ -769,6 +782,7 @@ class GPT(nn.Module):
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
+        self.smear_gate = SmearGate(model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
@@ -803,6 +817,7 @@ class GPT(nn.Module):
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
+        x = self.smear_gate(x)
         x0 = x
         skips: list[Tensor] = []
 
@@ -830,6 +845,7 @@ class GPT(nn.Module):
         """Return per-token logits (bsz, seq_len, vocab) without computing loss."""
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
+        x = self.smear_gate(x)
         x0 = x
         skips: list[Tensor] = []
         for i in range(self.num_encoder_layers):
